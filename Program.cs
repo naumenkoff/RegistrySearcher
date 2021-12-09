@@ -21,10 +21,11 @@ namespace RegistrySearcher
             var programName = GetUserVirtualInput("Введите что-то, чтобы найти кое-что > ",
                 ConsoleColor.Red).ToLower();
             var registrySearcher = new RegistrySearcher(programName, BlackFilter);
+            var multithreaded = GetUserPhysicalInput("Нажмите Y чтобы поиск был многопоточным, иначе он будет однопоточным: ", ConsoleKey.Y);
             PrintElapsedTime(registrySearcher);
-            var resultMessage = registrySearcher.DoWork(RegistrySearcher.SearchType.MultiThread);
+            var resultMessage = registrySearcher.DoWork(multithreaded ? RegistrySearcher.SearchType.MultiThread : RegistrySearcher.SearchType.SingleThread);
             PrintColoredLine(resultMessage, ConsoleColor.Green);
-            SaveResultInFile(registrySearcher);
+            //SaveResultInFile(registrySearcher);
         }
 
         private static void CheckHistory()

@@ -33,6 +33,27 @@ namespace RegistrySearcher
             FoundMatches = new List<WorkResult>();
         }
 
+        public async void CrateDeletionFile()
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                $"Удаление веток реестра {DateTime.Now.ToLocalTime().ToString(CultureInfo.CurrentCulture).Replace(':', '-')}.reg");
+            using var fileStream = File.CreateText(path);
+            await fileStream.WriteLineAsync("Windows Registry Editor Version 5.00");
+            foreach (var match in FoundMatches)
+            {
+                try
+                {
+                   await fileStream.WriteLineAsync($"[{match.RegistryKey}]");
+                   await fileStream.WriteLineAsync($"\"{match.ValueName}\"=hex:00");
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine(e);
+                }
+            }
+            await fileStream.FlushAsync();
+        }
+
         public string DoWork(SearchType searchType)
         {
             return searchType == SearchType.SingleThread ? StartSinglethreadedSearch() : StartMultithreadedSearch();
