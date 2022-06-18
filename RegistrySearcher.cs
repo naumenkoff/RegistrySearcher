@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 using Newtonsoft.Json;
 
@@ -11,68 +11,47 @@ namespace RegistrySearcher;
 
 public class RegistrySearcher
 {
-    public enum SearchType
+    public static readonly List<string> History = new();
+    private readonly IReadOnlyCollection<string> _blackList;
+    private readonly string _targetName;
+    private int _failedKeyAccess;
+    private List<WorkResult> _foundMatches;
+    private string _json;
+    private TimeSpan _searchTime;
+
+    public RegistrySearcher(string targetName, IReadOnlyCollection<string> blackList)
     {
-        SingleThread,
-        MultiThread
+        _targetName = targetName;
+        _blackList = blackList;
+        _foundMatches = new List<WorkResult>();
     }
 
-    public static List<string> History = new();
+    public bool Finished { get; private set; }
 
-    public RegistrySearcher(string programName, IReadOnlyCollection<string> blackList)
-    {
-        ProgramName = programName;
-        BlackList = blackList;
-        FoundMatches = new List<WorkResult>();
-    }
-
-    private IReadOnlyCollection<string> BlackList { get; }
-    private string ProgramName { get; }
-    private List<WorkResult> FoundMatches { get; set; }
-    private TimeSpan SearchTime { get; set; }
-    private int FailedKeyAccess { get; set; }
-    public bool Finished { get; set; }
-    public string Result { get; set; }
-
-    public string DoWork(SearchType searchType)
-    {
-        return searchType == SearchType.SingleThread ? StartSinglethreadedSearch() : StartMultithreadedSearch();
-    }
-
-    private string StartSinglethreadedSearch()
+    public async Task<string> StartSearch()
     {
         var startTime = DateTime.Now;
-        var registrySearcher = new Thread(() =>
-        {
-            using var currentUser64 = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, RegistryView.Registry64);
-            using var localMachine64 = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
-            FindMatches(currentUser64);
-            FindMatches(localMachine64);
-        });
-        registrySearcher.Start();
-        registrySearcher.Join();
-        return GetResult(startTime);
+        await Task.WhenAll(
+            //CreateSearchingStream(RegistryHive.ClassesRoot),
+            CreateSearchingStream(RegistryHive.CurrentUser),
+            CreateSearchingStream(RegistryHive.LocalMachine),
+            CreateSearchingStream(RegistryHive.Users)
+            //CreateSearchingStream(RegistryHive.PerformanceData),
+            //CreateSearchingStream(RegistryHive.CurrentConfig),
+        );
+        return ConstructJson(startTime);
     }
 
-    private string StartMultithreadedSearch()
+    private async Task CreateSearchingStream(RegistryHive registryHive)
     {
-        var startTime = DateTime.Now;
-        CreateSearchingThread(RegistryHive.CurrentUser);
-        CreateSearchingThread(RegistryHive.LocalMachine).Join();
-        return GetResult(startTime);
-    }
-
-    private Thread CreateSearchingThread(RegistryHive registryHive)
-    {
-        var searchThread = new Thread(() =>
+        await Task.Run(() =>
         {
             using var registryKey64 = RegistryKey.OpenBaseKey(registryHive, RegistryView.Registry64);
             FindMatches(registryKey64);
         });
-        searchThread.Start();
-        return searchThread;
     }
 
+    // private AutoResetEvent _resetEvent = new(false);
     private void FindMatches(RegistryKey registryKey)
     {
         foreach (var keyName in registryKey.GetSubKeyNames())
@@ -82,60 +61,55 @@ public class RegistrySearcher
                 using var regKey = registryKey.OpenSubKey(keyName);
                 if (regKey is null) return;
                 var valueNames = regKey.GetValueNames();
-                if (regKey.SubKeyCount is 0)
-                {
-                    FindValueMatches(regKey, valueNames);
-                }
+                if (regKey.SubKeyCount is 0) GetValue(regKey, valueNames);
                 else FindMatches(regKey);
             }
             catch
             {
-                FailedKeyAccess++;
+                _failedKeyAccess++;
             }
         }
     }
 
-    private void FindValueMatches(RegistryKey regKey, IEnumerable<string> valueNames)
+    private void GetValue(RegistryKey regKey, IEnumerable<string> valueNames)
     {
         foreach (var valueName in valueNames)
         {
             var value = regKey.GetValue(valueName) as string;
-            if (valueName.ToLower().Contains(ProgramName) || value != null && value.ToLower().Contains(ProgramName))
-            {
-                FoundMatches.Add(new WorkResult(regKey.Name, valueName, value));
-            }
+            if (valueName.ToLower().Contains(_targetName) || (value != null && value.ToLower().Contains(_targetName)))
+                _foundMatches.Add(new WorkResult(regKey.Name, valueName, value));
         }
     }
 
-    private string GetResult(DateTime startTime)
+    private string ConstructJson(DateTime startTime)
     {
-        SearchTime = DateTime.Now - startTime;
+        _searchTime = DateTime.Now - startTime;
         Filter();
         Finished = true;
-        Result = JsonConvert.SerializeObject(FoundMatches, Formatting.Indented) + Environment.NewLine + $"Найдено {FoundMatches.Count} вхождений за {SearchTime.TotalMilliseconds / 1000:F} сек. Количество необработанных ключей реестра: '{FailedKeyAccess}'.";
-        History.Add(Result);
-        return Result;
+        _json = JsonConvert.SerializeObject(_foundMatches, Formatting.Indented) + Environment.NewLine +
+                $"Найдено {_foundMatches.Count} вхождений за {_searchTime.TotalMilliseconds / 1000:F} сек. Количество необработанных ключей реестра: '{_failedKeyAccess}'.";
+        History.Add(_json);
+        return _json;
     }
 
     private void Filter()
     {
         var foundMatches = (
-            from t in FoundMatches
+            from t in _foundMatches
             let registryKey = t.RegistryKey.ToLower()
-            where !BlackList.Any(registryKey.Contains)
+            where !_blackList.Any(registryKey.Contains)
             select t).ToList();
-        FoundMatches.Clear();
-        FoundMatches = foundMatches;
+        _foundMatches = foundMatches;
     }
 
-    public string SaveResultIntoFile()
+    public async Task<string> SaveResult()
     {
         var desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var checkTime = DateTime.Now.ToLocalTime().ToString(CultureInfo.CurrentCulture).Replace(':', '-');
-        var path = Path.Combine(desktopDirectory, $"Результат сканирования {checkTime}.json");
+        var path = Path.Combine(desktopDirectory, $"Scan result {checkTime}.json");
         using var fileStream = File.CreateText(path);
-        fileStream.Write(Result);
-        fileStream.Flush();
+        await fileStream.WriteAsync(_json);
+        await fileStream.FlushAsync();
         return $"Результат сканирования сохранен по пути \"{path}\".";
     }
 
